@@ -157,10 +157,29 @@ internal sealed class UsageBalanceService : IDisposable
                 || !GetString(usageScript, "enabled", "false")
                     .Equals("true", StringComparison.OrdinalIgnoreCase))
             {
+                if (providerName.Equals("OpenAI Official", StringComparison.OrdinalIgnoreCase)
+                    && IsOfficialOAuth(settingsConfig))
+                {
+                    return new BalanceSnapshot(
+                        providerName,
+                        null,
+                        "USD",
+                        null,
+                        null,
+                        "官方 OAuth 未提供余额查询",
+                        DateTime.Now,
+                        IsConfigured: true);
+                }
+
                 return NotConfigured(providerName, "该供应商未启用余额查询");
             }
 
             string baseUrl = GetString(usageScript, "baseUrl", string.Empty).TrimEnd('/');
+            if (string.IsNullOrWhiteSpace(baseUrl))
+            {
+                baseUrl = ExtractBaseUrl(settingsConfig).TrimEnd('/');
+            }
+
             string apiKey = GetString(usageScript, "apiKey", string.Empty);
             if (string.IsNullOrWhiteSpace(apiKey))
             {
@@ -396,6 +415,248 @@ internal sealed class UsageBalanceService : IDisposable
         {
             // Some CCSwitch versions may leave settings_config as non-JSON.
             return string.Empty;
+        }
+    }
+
+    private static bool IsOfficialOAuth(string settingsConfig)
+    {
+        if (!TryGetAuthentication(settingsConfig, out JsonDocument? settingsJson, out JsonElement authentication))
+        {
+            return false;
+        }
+
+        using (settingsJson)
+        {
+            string authenticationMode = GetString(authentication, "auth_mode", string.Empty);
+            bool hasAccessToken = authentication.TryGetProperty("tokens", out JsonElement tokens)
+                && !string.IsNullOrWhiteSpace(GetString(tokens, "access_token", string.Empty));
+            bool hasApiKey = !string.IsNullOrWhiteSpace(
+                GetString(authentication, "OPENAI_API_KEY", string.Empty));
+
+            return !string.IsNullOrWhiteSpace(authenticationMode)
+                && hasAccessToken
+                && !hasApiKey;
+        }
+    }
+
+    private static string ExtractBaseUrl(string settingsConfig)
+    {
+        if (string.IsNullOrWhiteSpace(settingsConfig))
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            using JsonDocument settingsJson = JsonDocument.Parse(settingsConfig);
+            string configuration = GetString(settingsJson.RootElement, "config", string.Empty);
+            return ExtractModelProviderBaseUrl(configuration);
+        }
+        catch (JsonException)
+        {
+            return string.Empty;
+        }
+    }
+
+    private static string ExtractModelProviderBaseUrl(string configuration)
+    {
+        if (string.IsNullOrWhiteSpace(configuration))
+        {
+            return string.Empty;
+        }
+
+        string? modelProvider = null;
+        string? currentSection = null;
+        string[] lines = configuration.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+
+        foreach (string line in lines)
+        {
+            string trimmed = line.Trim();
+            if (TryReadTomlSection(trimmed, out string? section))
+            {
+                currentSection = section;
+                continue;
+            }
+
+            if (currentSection is null
+                && TryReadTomlStringAssignment(trimmed, "model_provider", out string? value))
+            {
+                modelProvider = value;
+                break;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(modelProvider))
+        {
+            return string.Empty;
+        }
+
+        currentSection = null;
+        foreach (string line in lines)
+        {
+            string trimmed = line.Trim();
+            if (TryReadTomlSection(trimmed, out string? section))
+            {
+                currentSection = section;
+                continue;
+            }
+
+            if (IsModelProviderSection(currentSection, modelProvider)
+                && TryReadTomlStringAssignment(trimmed, "base_url", out string? baseUrl))
+            {
+                return baseUrl ?? string.Empty;
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static bool TryReadTomlSection(string line, out string? section)
+    {
+        section = null;
+        if (line.Length < 3 || line[0] != '[' || line[^1] != ']')
+        {
+            return false;
+        }
+
+        section = line[1..^1].Trim();
+        return section.Length > 0;
+    }
+
+    private static bool IsModelProviderSection(string? section, string modelProvider)
+    {
+        const string prefix = "model_providers.";
+        if (section is null || !section.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string providerSegment = section[prefix.Length..].Trim();
+        return TryReadTomlString(providerSegment, out string? sectionProvider)
+            && string.Equals(sectionProvider, modelProvider, StringComparison.Ordinal);
+    }
+
+    private static bool TryReadTomlStringAssignment(
+        string line,
+        string expectedKey,
+        out string? value)
+    {
+        value = null;
+        if (line.Length == 0 || line[0] == '#')
+        {
+            return false;
+        }
+
+        int equalsIndex = line.IndexOf('=');
+        if (equalsIndex <= 0
+            || !line[..equalsIndex].Trim().Equals(expectedKey, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return TryReadTomlString(line[(equalsIndex + 1)..].Trim(), out value);
+    }
+
+    private static bool TryReadTomlString(string text, out string? value)
+    {
+        value = null;
+        if (text.Length == 0)
+        {
+            return false;
+        }
+
+        if (text[0] == '\'')
+        {
+            int closingQuote = text.IndexOf('\'', 1);
+            if (closingQuote < 0)
+            {
+                return false;
+            }
+
+            value = text[1..closingQuote];
+            return true;
+        }
+
+        if (text[0] == '"')
+        {
+            int closingQuote = FindClosingDoubleQuote(text);
+            if (closingQuote < 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                value = JsonSerializer.Deserialize<string>(text[..(closingQuote + 1)]);
+                return value is not null;
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+        }
+
+        int commentIndex = text.IndexOf('#');
+        value = (commentIndex >= 0 ? text[..commentIndex] : text).Trim();
+        return value.Length > 0;
+    }
+
+    private static int FindClosingDoubleQuote(string text)
+    {
+        bool escaped = false;
+        for (int index = 1; index < text.Length; index++)
+        {
+            char character = text[index];
+            if (escaped)
+            {
+                escaped = false;
+                continue;
+            }
+
+            if (character == '\\')
+            {
+                escaped = true;
+                continue;
+            }
+
+            if (character == '"')
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static bool TryGetAuthentication(
+        string settingsConfig,
+        out JsonDocument? settingsJson,
+        out JsonElement authentication)
+    {
+        settingsJson = null;
+        authentication = default;
+        if (string.IsNullOrWhiteSpace(settingsConfig))
+        {
+            return false;
+        }
+
+        try
+        {
+            settingsJson = JsonDocument.Parse(settingsConfig);
+            if (settingsJson.RootElement.TryGetProperty("auth", out authentication))
+            {
+                return true;
+            }
+
+            settingsJson.Dispose();
+            settingsJson = null;
+            return false;
+        }
+        catch (JsonException)
+        {
+            settingsJson?.Dispose();
+            settingsJson = null;
+            return false;
         }
     }
 

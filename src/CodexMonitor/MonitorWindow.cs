@@ -621,6 +621,14 @@ internal sealed class MonitorWindow : Form
         }
         else
         {
+            if (snapshot.Error == "官方 OAuth 未提供余额查询")
+            {
+                balanceValue.Text = "不可查询";
+                balanceValue.ForeColor = Color.FromArgb(100, 116, 139);
+                balanceMeta.Text = $"{snapshot.ProviderName} · {snapshot.Error}";
+                return;
+            }
+
             balanceValue.Text = (snapshot.IsConfigured ? "暂不可用" : "未配置");
             balanceValue.ForeColor = (snapshot.IsConfigured ? Color.FromArgb(217, 119, 6) : Color.FromArgb(100, 116, 139));
             balanceMeta.Text = snapshot.Error ?? snapshot.ProviderName;

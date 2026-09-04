@@ -487,6 +487,13 @@ internal sealed class CodexLogMonitor : IDisposable
 
             switch (payloadType.GetString())
             {
+                case "task_started":
+                    tracker.WaitingForUserStart = false;
+                    tracker.IsActive = true;
+                    tracker.HasKnownState = true;
+                    tracker.StartedAt = ReadTaskStartedTimestamp(root, payload);
+                    return RolloutSignal.UserStart;
+
                 case "user_message":
                     tracker.WaitingForUserStart = false;
                     tracker.IsActive = true;
@@ -536,19 +543,42 @@ internal sealed class CodexLogMonitor : IDisposable
         return RolloutSignal.None;
     }
 
+    private static DateTime ReadTaskStartedTimestamp(
+        JsonElement root,
+        JsonElement payload) =>
+        TryReadTimestamp(payload, "started_at", out var startedAt)
+            ? startedAt
+            : ReadTimestamp(root);
+
     private static DateTime ReadTimestamp(JsonElement root)
     {
-        if (root.TryGetProperty("timestamp", out var timestamp)
+        if (TryReadTimestamp(root, "timestamp", out var timestamp))
+        {
+            return timestamp;
+        }
+
+        return DateTime.Now;
+    }
+
+    private static bool TryReadTimestamp(
+        JsonElement element,
+        string propertyName,
+        out DateTime timestamp)
+    {
+        if (element.TryGetProperty(propertyName, out var value)
+            && value.ValueKind == JsonValueKind.String
             && DateTimeOffset.TryParse(
-                timestamp.GetString(),
+                value.GetString(),
                 CultureInfo.InvariantCulture,
                 DateTimeStyles.AssumeUniversal,
                 out var parsed))
         {
-            return parsed.LocalDateTime;
+            timestamp = parsed.LocalDateTime;
+            return true;
         }
 
-        return DateTime.Now;
+        timestamp = default;
+        return false;
     }
 
     private static void SetTerminalState(RolloutTracker tracker)

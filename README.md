@@ -35,6 +35,8 @@ Codex Monitor 在本机读取以下数据：
 
 程序以只读方式打开 Codex 和 CCSwitch 数据库。查询余额时，它会把 CCSwitch 中当前供应商的 API Key 作为 Bearer Header 发往该供应商配置的 HTTPS 地址或本机回环地址。Codex Monitor 不显示 API Key，也不会把 Key 写入自己的设置或日志。
 
+CCSwitch 中的 `OpenAI Official` OAuth 配置没有金额余额查询脚本，界面会显示“不可查询”；任务监控功能不受影响。第三方供应商需要在 CCSwitch 中启用余额查询，并提供相应的接口配置。
+
 个人设置保存在 `%APPDATA%\CodexMonitor\settings.ini`。
 
 ## 诊断命令

@@ -28,6 +28,63 @@ public sealed class CodexLogMonitorTests
     }
 
     [Fact]
+    public void InitialScan_TaskStartedAfterTerminalBeginsANewTurn()
+    {
+        using var fixture = new MonitorFixture();
+        fixture.WriteNewRollout(
+            "first.jsonl",
+            UserMessage(),
+            TaskComplete(),
+            ResponseItem("agent_message"),
+            TaskStarted(
+                startedAt: "2026-09-04T11:22:33Z",
+                rootTimestamp: "2026-09-04T11:22:30Z"),
+            ResponseItem("reasoning"));
+        fixture.InsertThread("thread-1", "first.jsonl");
+
+        using var monitor = fixture.CreateMonitor();
+
+        var snapshot = monitor.ReadSnapshot();
+
+        var task = Assert.Single(snapshot.ActiveTasks);
+        Assert.Equal(
+            LocalDateTime("2026-09-04T11:22:33Z"),
+            task.StartedAt);
+        Assert.Equal(0, snapshot.CompletedEvents);
+    }
+
+    [Fact]
+    public void IncrementalScan_TaskStartedWithoutUserMessageBeginsANewTurn()
+    {
+        using var fixture = new MonitorFixture();
+        fixture.WriteNewRollout("first.jsonl", UserMessage());
+        fixture.InsertThread("thread-1", "first.jsonl");
+
+        using var monitor = fixture.CreateMonitor();
+        Assert.Single(monitor.ReadSnapshot().ActiveTasks);
+
+        fixture.AppendRollout(
+            "first.jsonl",
+            TaskComplete(),
+            ResponseItem("agent_message"));
+        Assert.Empty(monitor.ReadSnapshot().ActiveTasks);
+
+        fixture.AppendRollout(
+            "first.jsonl",
+            TaskStarted(
+                startedAt: null,
+                rootTimestamp: "2026-09-04T12:34:56Z"),
+            ResponseItem("reasoning"));
+
+        var snapshot = monitor.ReadSnapshot();
+
+        var task = Assert.Single(snapshot.ActiveTasks);
+        Assert.Equal(
+            LocalDateTime("2026-09-04T12:34:56Z"),
+            task.StartedAt);
+    }
+
+    [Fact]
     public void UserMessage_AfterTerminalEvent_StartsANewTurn()
     {
         using var fixture = new MonitorFixture();
@@ -52,9 +109,7 @@ public sealed class CodexLogMonitorTests
 
         var task = Assert.Single(snapshot.ActiveTasks);
         Assert.Equal(
-            DateTimeOffset.Parse(
-                "2026-09-04T11:22:33Z",
-                CultureInfo.InvariantCulture).LocalDateTime,
+            LocalDateTime("2026-09-04T11:22:33Z"),
             task.StartedAt);
     }
 
@@ -138,6 +193,28 @@ public sealed class CodexLogMonitorTests
                 payload = new { type = "task_complete" }
             });
 
+    private static string TaskStarted(
+        string? startedAt,
+        string rootTimestamp)
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["type"] = "task_started"
+        };
+        if (startedAt is not null)
+        {
+            payload["started_at"] = startedAt;
+        }
+
+        return JsonSerializer.Serialize(
+            new Dictionary<string, object?>
+            {
+                ["timestamp"] = rootTimestamp,
+                ["type"] = "event_msg",
+                ["payload"] = payload
+            });
+    }
+
     private static string ResponseItem(string payloadType) =>
         JsonSerializer.Serialize(
             new
@@ -146,6 +223,11 @@ public sealed class CodexLogMonitorTests
                 type = "response_item",
                 payload = new { type = payloadType }
             });
+
+    private static DateTime LocalDateTime(string timestamp) =>
+        DateTimeOffset.Parse(
+            timestamp,
+            CultureInfo.InvariantCulture).LocalDateTime;
 
     private sealed class MonitorFixture : IDisposable
     {
