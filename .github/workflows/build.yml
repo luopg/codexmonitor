@@ -1,0 +1,45 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore CodexMonitor.sln --locked-mode
+
+      - name: Check formatting
+        run: dotnet format CodexMonitor.sln --verify-no-changes --no-restore
+
+      - name: Build
+        run: dotnet build CodexMonitor.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test CodexMonitor.sln --configuration Release --no-build
+
+      - name: Publish and smoke test
+        shell: pwsh
+        run: ./scripts/publish.ps1
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: CodexMonitor-win-x64
+          path: artifacts/win-x64/
+          if-no-files-found: error

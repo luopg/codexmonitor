@@ -1,0 +1,29 @@
+# .NET build outputs
+**/bin/
+**/obj/
+artifacts/
+
+# Local SDK installations
+.dotnet/
+
+# IDE and local tooling
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Local diagnostics and temporary files
+*.tmp
+*.log
+snapshot*.json
+balance*.json
+settings.ini
+*.sqlite*
+*.db*
+*.jsonl
+.env*
+*.userprefs
+
+# OS metadata
+Thumbs.db
+Desktop.ini
