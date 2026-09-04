@@ -23,6 +23,7 @@ internal sealed class UsageBalanceService : IDisposable
     private readonly TimeSpan _responseHeadersTimeout;
     private readonly TimeSpan _responseBodyTimeout;
     private readonly int _maximumResponseBytes;
+    private readonly Func<OfficialPlanUsageSnapshot?> _readOfficialPlanUsage;
 
     public UsageBalanceService()
         : this(
@@ -35,6 +36,7 @@ internal sealed class UsageBalanceService : IDisposable
             DefaultResponseHeadersTimeout,
             DefaultResponseBodyTimeout,
             DefaultMaximumResponseBytes,
+            new OfficialPlanUsageReader().Read,
             ownsHttpClient: true)
     {
     }
@@ -45,7 +47,8 @@ internal sealed class UsageBalanceService : IDisposable
         TimeSpan databaseTimeout,
         TimeSpan responseHeadersTimeout,
         TimeSpan responseBodyTimeout,
-        int maximumResponseBytes)
+        int maximumResponseBytes,
+        Func<OfficialPlanUsageSnapshot?>? officialPlanUsageReader = null)
         : this(
             httpClient,
             databasePath,
@@ -53,6 +56,7 @@ internal sealed class UsageBalanceService : IDisposable
             responseHeadersTimeout,
             responseBodyTimeout,
             maximumResponseBytes,
+            officialPlanUsageReader ?? (() => null),
             ownsHttpClient: false)
     {
     }
@@ -64,6 +68,7 @@ internal sealed class UsageBalanceService : IDisposable
         TimeSpan responseHeadersTimeout,
         TimeSpan responseBodyTimeout,
         int maximumResponseBytes,
+        Func<OfficialPlanUsageSnapshot?> officialPlanUsageReader,
         bool ownsHttpClient)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
@@ -72,6 +77,7 @@ internal sealed class UsageBalanceService : IDisposable
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(responseHeadersTimeout, TimeSpan.Zero);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(responseBodyTimeout, TimeSpan.Zero);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumResponseBytes);
+        ArgumentNullException.ThrowIfNull(officialPlanUsageReader);
 
         _httpClient = httpClient;
         _databasePath = databasePath;
@@ -79,6 +85,7 @@ internal sealed class UsageBalanceService : IDisposable
         _responseHeadersTimeout = responseHeadersTimeout;
         _responseBodyTimeout = responseBodyTimeout;
         _maximumResponseBytes = maximumResponseBytes;
+        _readOfficialPlanUsage = officialPlanUsageReader;
         _ownsHttpClient = ownsHttpClient;
     }
 
@@ -90,7 +97,8 @@ internal sealed class UsageBalanceService : IDisposable
 
         if (!File.Exists(_databasePath))
         {
-            return NotConfigured("API", "未找到 CCSwitch 配置");
+            return ReadOfficialPlanSnapshot()
+                ?? NotConfigured("API", "未找到 CCSwitch 配置或官方套餐限额");
         }
 
         string providerName;
@@ -129,7 +137,8 @@ internal sealed class UsageBalanceService : IDisposable
 
             if (!await reader.ReadAsync(databaseToken).ConfigureAwait(false))
             {
-                return NotConfigured("API", "CCSwitch 没有当前 Codex 供应商");
+                return ReadOfficialPlanSnapshot()
+                    ?? NotConfigured("API", "CCSwitch 没有当前 Codex 供应商");
             }
 
             providerName = reader.IsDBNull(0) ? "API" : reader.GetString(0);
@@ -152,25 +161,26 @@ internal sealed class UsageBalanceService : IDisposable
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (providerName.Equals("OpenAI Official", StringComparison.OrdinalIgnoreCase)
+                && IsOfficialOAuth(settingsConfig))
+            {
+                return ReadOfficialPlanSnapshot(providerName)
+                    ?? new BalanceSnapshot(
+                        providerName,
+                        null,
+                        "%",
+                        null,
+                        null,
+                        "官方套餐限额暂不可查询",
+                        DateTime.Now,
+                        IsConfigured: true);
+            }
+
             using JsonDocument metadataJson = JsonDocument.Parse(metadata);
             if (!metadataJson.RootElement.TryGetProperty("usage_script", out JsonElement usageScript)
                 || !GetString(usageScript, "enabled", "false")
                     .Equals("true", StringComparison.OrdinalIgnoreCase))
             {
-                if (providerName.Equals("OpenAI Official", StringComparison.OrdinalIgnoreCase)
-                    && IsOfficialOAuth(settingsConfig))
-                {
-                    return new BalanceSnapshot(
-                        providerName,
-                        null,
-                        "USD",
-                        null,
-                        null,
-                        "官方 OAuth 未提供余额查询",
-                        DateTime.Now,
-                        IsConfigured: true);
-                }
-
                 return NotConfigured(providerName, "该供应商未启用余额查询");
             }
 
@@ -314,6 +324,30 @@ internal sealed class UsageBalanceService : IDisposable
         }
     }
 
+    private BalanceSnapshot? ReadOfficialPlanSnapshot(
+        string providerName = "OpenAI Official")
+    {
+        try
+        {
+            OfficialPlanUsageSnapshot? usage = _readOfficialPlanUsage();
+            return usage is null
+                ? null
+                : new BalanceSnapshot(
+                    providerName,
+                    (decimal)usage.RemainingPercent,
+                    "%",
+                    usage.Detail,
+                    null,
+                    null,
+                    usage.ObservedAt.LocalDateTime,
+                    IsConfigured: true);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static BalanceSnapshot NotConfigured(string providerName, string error) =>
         new(providerName, null, "USD", null, null, error, DateTime.Now, IsConfigured: false);
 
@@ -428,13 +462,10 @@ internal sealed class UsageBalanceService : IDisposable
         using (settingsJson)
         {
             string authenticationMode = GetString(authentication, "auth_mode", string.Empty);
-            bool hasAccessToken = authentication.TryGetProperty("tokens", out JsonElement tokens)
-                && !string.IsNullOrWhiteSpace(GetString(tokens, "access_token", string.Empty));
             bool hasApiKey = !string.IsNullOrWhiteSpace(
                 GetString(authentication, "OPENAI_API_KEY", string.Empty));
 
-            return !string.IsNullOrWhiteSpace(authenticationMode)
-                && hasAccessToken
+            return authenticationMode.Equals("chatgpt", StringComparison.OrdinalIgnoreCase)
                 && !hasApiKey;
         }
     }

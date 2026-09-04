@@ -173,7 +173,7 @@ internal sealed class MonitorWindow : Form
         tableLayoutPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
         tableLayoutPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
         DashboardCard control = CreateCard("工作中项目", projectValue, projectMeta, Color.FromArgb(16, 185, 129), new Padding(0, 0, 9, 0));
-        DashboardCard balanceCard = CreateCard("API 余额", balanceValue, balanceMeta, Color.FromArgb(99, 102, 241), new Padding(9, 0, 0, 0));
+        DashboardCard balanceCard = CreateCard("用量余量", balanceValue, balanceMeta, Color.FromArgb(99, 102, 241), new Padding(9, 0, 0, 0));
         compactExpandButton.Text = "展开";
         compactExpandButton.Size = new Size(58, 28);
         compactExpandButton.FlatStyle = FlatStyle.Flat;
@@ -198,7 +198,7 @@ internal sealed class MonitorWindow : Form
         projectValue.Text = "0";
         projectMeta.Text = "0 个任务正在运行";
         balanceValue.Text = "读取中…";
-        balanceMeta.Text = "正在连接 CCSwitch 余额接口";
+        balanceMeta.Text = "正在读取套餐限额或 API 余额";
         Panel panel = (Panel)(listHeaderPanel = new Panel
         {
             Dock = DockStyle.Fill,
@@ -572,66 +572,50 @@ internal sealed class MonitorWindow : Form
 
     public void UpdateBalance(BalanceSnapshot snapshot)
     {
-        decimal? remaining = snapshot.Remaining;
-        if (remaining.HasValue)
+        if (snapshot.Remaining is decimal remaining)
         {
-            decimal valueOrDefault = remaining.GetValueOrDefault();
-            Label label = balanceValue;
-            string text;
-            DefaultInterpolatedStringHandler defaultInterpolatedStringHandler;
-            if (!(snapshot.Unit == "USD"))
+            balanceValue.Text = snapshot.Unit switch
             {
-                defaultInterpolatedStringHandler = new DefaultInterpolatedStringHandler(1, 2);
-                defaultInterpolatedStringHandler.AppendFormatted(valueOrDefault, "N2");
-                defaultInterpolatedStringHandler.AppendLiteral(" ");
-                defaultInterpolatedStringHandler.AppendFormatted(snapshot.Unit);
-                text = defaultInterpolatedStringHandler.ToStringAndClear();
-            }
-            else
+                "USD" => $"${remaining:N2}",
+                "%" => $"{remaining:N1}%",
+                _ => $"{remaining:N2} {snapshot.Unit}",
+            };
+
+            var details = new List<string> { snapshot.ProviderName };
+            if (!string.IsNullOrWhiteSpace(snapshot.PlanName))
             {
-                defaultInterpolatedStringHandler = new DefaultInterpolatedStringHandler(1, 1);
-                defaultInterpolatedStringHandler.AppendLiteral("$");
-                defaultInterpolatedStringHandler.AppendFormatted(valueOrDefault, "N2");
-                text = defaultInterpolatedStringHandler.ToStringAndClear();
+                details.Add(snapshot.PlanName);
             }
-            label.Text = text;
-            remaining = snapshot.TodayCost;
-            string text2;
-            if (remaining.HasValue)
+
+            if (snapshot.TodayCost is decimal todayCost)
             {
-                decimal valueOrDefault2 = remaining.GetValueOrDefault();
-                text2 = snapshot.Unit == "USD"
-                    ? $" · 今日 ${valueOrDefault2:N2}"
-                    : $" · 今日 {valueOrDefault2:N2} {snapshot.Unit}";
+                details.Add(snapshot.Unit == "USD"
+                    ? $"今日 ${todayCost:N2}"
+                    : $"今日 {todayCost:N2} {snapshot.Unit}");
             }
-            else
-            {
-                text2 = string.Empty;
-            }
-            string value = text2;
-            Label label2 = balanceMeta;
-            defaultInterpolatedStringHandler = new DefaultInterpolatedStringHandler(6, 3);
-            defaultInterpolatedStringHandler.AppendFormatted(snapshot.ProviderName);
-            defaultInterpolatedStringHandler.AppendFormatted(value);
-            defaultInterpolatedStringHandler.AppendLiteral(" · ");
-            defaultInterpolatedStringHandler.AppendFormatted(snapshot.UpdatedAt, "HH:mm");
-            defaultInterpolatedStringHandler.AppendLiteral(" 更新");
-            label2.Text = defaultInterpolatedStringHandler.ToStringAndClear();
-            balanceValue.ForeColor = ((valueOrDefault < 10m) ? Color.FromArgb(220, 38, 38) : Color.FromArgb(15, 23, 42));
+
+            details.Add($"{snapshot.UpdatedAt:HH:mm} 更新");
+            balanceMeta.Text = string.Join(" · ", details);
+            helpTips.SetToolTip(balanceMeta, balanceMeta.Text);
+            balanceValue.ForeColor = remaining < 10m
+                ? Color.FromArgb(220, 38, 38)
+                : Color.FromArgb(15, 23, 42);
         }
         else
         {
-            if (snapshot.Error == "官方 OAuth 未提供余额查询")
+            if (snapshot.Error == "官方套餐限额暂不可查询")
             {
                 balanceValue.Text = "不可查询";
                 balanceValue.ForeColor = Color.FromArgb(100, 116, 139);
                 balanceMeta.Text = $"{snapshot.ProviderName} · {snapshot.Error}";
+                helpTips.SetToolTip(balanceMeta, balanceMeta.Text);
                 return;
             }
 
             balanceValue.Text = (snapshot.IsConfigured ? "暂不可用" : "未配置");
             balanceValue.ForeColor = (snapshot.IsConfigured ? Color.FromArgb(217, 119, 6) : Color.FromArgb(100, 116, 139));
             balanceMeta.Text = snapshot.Error ?? snapshot.ProviderName;
+            helpTips.SetToolTip(balanceMeta, balanceMeta.Text);
         }
     }
 

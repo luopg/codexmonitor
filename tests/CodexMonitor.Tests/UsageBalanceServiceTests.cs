@@ -35,29 +35,82 @@ public sealed class UsageBalanceServiceTests
     [Fact]
     public async Task ReadAsync_ReportsOfficialOAuthAsUnavailable()
     {
-        string settingsConfig = JsonSerializer.Serialize(
-            new
-            {
-                auth = new
-                {
-                    auth_mode = "chatgpt",
-                    OPENAI_API_KEY = (string?)null,
-                    tokens = new { access_token = "oauth-access-token" },
-                },
-                config = string.Empty,
-            });
         using var fixture = new BalanceFixture(
             new StringContent("{}"),
             providerName: "OpenAI Official",
             metadata: "{}",
-            settingsConfig: settingsConfig);
+            settingsConfig: CreateOfficialOAuthSettings());
 
         BalanceSnapshot snapshot = await fixture.Service.ReadAsync();
 
         Assert.True(snapshot.IsConfigured);
         Assert.Equal("OpenAI Official", snapshot.ProviderName);
-        Assert.Equal("官方 OAuth 未提供余额查询", snapshot.Error);
+        Assert.Equal("官方套餐限额暂不可查询", snapshot.Error);
         Assert.Null(fixture.LastRequestUri);
+    }
+
+    [Fact]
+    public async Task ReadAsync_UsesLocalPlanUsageForOfficialOAuth()
+    {
+        var observedAt = new DateTimeOffset(2026, 9, 4, 11, 0, 0, TimeSpan.Zero);
+        var resetsAt = observedAt.AddHours(2);
+        const string detail = "plus · 剩余 72.5% · 主窗口 72.5%/5 小时/09-04 21:00 重置";
+        var usage = new OfficialPlanUsageSnapshot(
+            "codex",
+            "plus",
+            new OfficialPlanUsageWindow(27.5, 72.5, 300, resetsAt),
+            null,
+            72.5,
+            observedAt,
+            detail);
+        using var fixture = new BalanceFixture(
+            new StringContent("{}"),
+            providerName: "OpenAI Official",
+            metadata: "{}",
+            settingsConfig: CreateOfficialOAuthSettings(),
+            officialPlanUsageReader: () => usage);
+
+        BalanceSnapshot snapshot = await fixture.Service.ReadAsync();
+
+        Assert.True(snapshot.IsConfigured);
+        Assert.Equal(72.5m, snapshot.Remaining);
+        Assert.Equal("%", snapshot.Unit);
+        Assert.Equal(detail, snapshot.PlanName);
+        Assert.Equal(observedAt.LocalDateTime, snapshot.UpdatedAt);
+        Assert.Null(snapshot.Error);
+        Assert.Null(fixture.LastRequestUri);
+    }
+
+    [Fact]
+    public async Task ReadAsync_UsesLocalPlanUsageWithoutCCSwitch()
+    {
+        var observedAt = new DateTimeOffset(2026, 9, 4, 11, 0, 0, TimeSpan.Zero);
+        var usage = new OfficialPlanUsageSnapshot(
+            "codex",
+            "pro",
+            new OfficialPlanUsageWindow(23, 77, 10080, observedAt.AddDays(7)),
+            null,
+            77,
+            observedAt,
+            "pro · 剩余 77% · 主窗口 77%/7 天/09-11 19:00 重置");
+        var handler = new StaticResponseHandler(new StringContent("{}"));
+        using var httpClient = new HttpClient(handler);
+        using var service = new UsageBalanceService(
+            httpClient,
+            Path.Combine(Path.GetTempPath(), $"missing-{Guid.NewGuid():N}.db"),
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(1),
+            1024,
+            () => usage);
+
+        BalanceSnapshot snapshot = await service.ReadAsync();
+
+        Assert.Equal("OpenAI Official", snapshot.ProviderName);
+        Assert.Equal(77m, snapshot.Remaining);
+        Assert.Equal("%", snapshot.Unit);
+        Assert.Null(snapshot.Error);
+        Assert.Null(handler.LastRequestUri);
     }
 
     [Fact]
@@ -116,7 +169,8 @@ public sealed class UsageBalanceServiceTests
             int maximumResponseBytes = 1024,
             string providerName = "Test provider",
             string? metadata = null,
-            string? settingsConfig = null)
+            string? settingsConfig = null,
+            Func<OfficialPlanUsageSnapshot?>? officialPlanUsageReader = null)
         {
             Directory.CreateDirectory(_root);
             string databasePath = Path.Combine(_root, "cc-switch.db");
@@ -139,7 +193,8 @@ public sealed class UsageBalanceServiceTests
                 databaseTimeout: TimeSpan.FromSeconds(1),
                 responseHeadersTimeout: TimeSpan.FromSeconds(1),
                 responseBodyTimeout: responseBodyTimeout ?? TimeSpan.FromSeconds(1),
-                maximumResponseBytes);
+                maximumResponseBytes,
+                officialPlanUsageReader);
         }
 
         public UsageBalanceService Service { get; }
@@ -192,6 +247,18 @@ public sealed class UsageBalanceServiceTests
             command.ExecuteNonQuery();
         }
     }
+
+    private static string CreateOfficialOAuthSettings() =>
+        JsonSerializer.Serialize(
+            new
+            {
+                auth = new
+                {
+                    auth_mode = "chatgpt",
+                    OPENAI_API_KEY = (string?)null,
+                },
+                config = string.Empty,
+            });
 
     private sealed class StaticResponseHandler(HttpContent responseContent) : HttpMessageHandler
     {
